@@ -1,0 +1,64 @@
+# Default-deny + selectively allow, for team-payments specifically (has real ingress
+# from the ALB + is scraped by Prometheus, unlike the other two teams).
+#
+# ALB traffic (target-type: ip) and kubelet health-check probes both arrive from
+# inside the VPC, not from a specific namespace/pod -- ipBlock on the VPC CIDR is the
+# only way to allow them; namespaceSelector can't express "traffic from the node
+# itself" or "traffic from an AWS-managed ENI". This isn't a perimeter-security
+# control (that's already handled by security groups/subnet layout) -- it's
+# inter-namespace isolation between workloads that already trust the VPC network
+# layer.
+#
+# UNVERIFIED until tested live: AWS VPC CNI's NetworkPolicy agent is known to
+# actually enforce policy against kubelet-sourced probe traffic (unlike some other
+# CNIs, which exempt it automatically) -- if pods go NotReady after this applies,
+# check that first.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: team-payments
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-baseline
+  namespace: team-payments
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 10.50.0.0/16   # ALB (target-type: ip) + kubelet probes
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: 9113             # Prometheus scraping the frontend's nginx-exporter sidecar
+    - from:
+        - podSelector: {}         # same-namespace: frontend -> backend
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: "0.0.0.0/0"
+      ports:
+        - protocol: TCP
+          port: 443             # DynamoDB (via the free VPC Gateway endpoint -- the
+                                 # endpoint changes the route, not whether NetworkPolicy
+                                 # still needs to permit the destination) + any other AWS API
+    - to:
+        - podSelector: {}

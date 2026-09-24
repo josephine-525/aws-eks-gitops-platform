@@ -1,0 +1,42 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: platform
+  namespace: argocd
+spec:
+  description: >-
+    Platform-level Applications not owned by any one team: the observability
+    stack (kube-prometheus-stack, dashboards) and team-payments's shared Ingress
+    (spans 2 releases' Services, so it isn't "team-payments's own" either).
+  sourceRepos:
+    - https://gitlab.com/demo-org/observability.git
+    - https://gitlab.com/demo-org/expenseapp.git
+    - https://prometheus-community.github.io/helm-charts
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: monitoring
+    - server: https://kubernetes.default.svc
+      namespace: team-payments
+    # kube-prometheus-stack also creates Services in kube-system for scraping
+    # control-plane components (kube-scheduler/kube-proxy/etc) -- confirmed by
+    # rendering the real chart (`helm template ... | grep namespace:`), not
+    # assumed. Missing this caused a real sync failure: "namespace kube-system
+    # is not permitted in project 'platform'".
+    - server: https://kubernetes.default.svc
+      namespace: kube-system
+  clusterResourceWhitelist:
+    # Broader than the team projects on purpose: kube-prometheus-stack installs
+    # its own CRDs, ClusterRoles, and webhook configs -- all cluster-scoped,
+    # none of which any team's own Application needs.
+    - group: ""
+      kind: Namespace
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration

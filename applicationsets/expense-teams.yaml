@@ -1,0 +1,66 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: expense-teams
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - list:
+        elements:
+          - name: team-payments-backend
+            namespace: team-payments
+            project: team-payments
+            valuesRepoURL: https://gitlab.com/demo-org/expenseapp.git
+            valuesFile: values-backend.yaml
+          - name: team-payments-frontend
+            namespace: team-payments
+            project: team-payments
+            valuesRepoURL: https://gitlab.com/demo-org/expenseapp.git
+            valuesFile: values-frontend.yaml
+          - name: team-fraud-detection
+            namespace: team-fraud-detection
+            project: team-fraud-detection
+            valuesRepoURL: https://gitlab.com/demo-org/fraud-detection-demo.git
+            valuesFile: values.yaml
+          - name: team-analytics
+            namespace: team-analytics
+            project: team-analytics
+            valuesRepoURL: https://gitlab.com/demo-org/analytics-demo.git
+            valuesFile: values.yaml
+  template:
+    metadata:
+      name: '{{.name}}'
+    spec:
+      project: '{{.project}}'
+      sources:
+        - repoURL: https://gitlab.com/demo-org/helm-charts.git
+          targetRevision: v0.2.0
+          path: charts/common-web-service
+          helm:
+            valueFiles:
+              - $values/{{.valuesFile}}
+        - repoURL: '{{.valuesRepoURL}}'
+          targetRevision: main
+          ref: values
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '{{.namespace}}'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+      # Applied to all 4 elements, not just the 2 with an HPA (team-payments-backend/-frontend):
+      # harmless no-op for the other 2 (nothing else mutates their spec.replicas, so there's
+      # nothing to ever "ignore" there), and avoids the per-generator conditional template
+      # override this file used to attempt — the ArgoCD API server rejected that as invalid
+      # (a generator-level `template` must itself carry metadata/spec.project/spec.destination,
+      # it doesn't partially merge the way an earlier version of this file assumed).
+      ignoreDifferences:
+        - group: apps
+          kind: Deployment
+          jsonPointers:
+            - /spec/replicas

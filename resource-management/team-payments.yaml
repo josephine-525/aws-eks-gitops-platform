@@ -1,0 +1,35 @@
+# Sized from the real values already committed in expenseapp/values-backend.yaml and
+# values-frontend.yaml, not guessed: at HPA's max scale-out (5+5 pods),
+#   backend:  5 x (100m/128Mi request, 500m/256Mi limit)             = 500m/640Mi req, 2500m/1280Mi limit
+#   frontend: 5 x (60m/96Mi request, 250m/192Mi limit, 2 containers) = 300m/480Mi req, 1250m/960Mi limit
+#   total:                                                             800m/1120Mi req, 3750m/2240Mi limit
+# ResourceQuota below adds ~30-50% headroom on top of that for rolling-update overlap
+# (briefly more than HPA's ceiling while a new ReplicaSet comes up before the old one
+# scales down) -- sized tight enough to still mean something, not "unlimited".
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: team-payments-quota
+  namespace: team-payments
+spec:
+  hard:
+    requests.cpu: "1"
+    requests.memory: 1.5Gi
+    limits.cpu: "4"
+    limits.memory: 2.5Gi
+    pods: "15"
+---
+# Not needed for defaulting (both Deployments already declare real resources) --
+# this is a guardrail against a FUTURE container being added to the chart without
+# resources set, which would otherwise silently have no cap at all.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: team-payments-limits
+  namespace: team-payments
+spec:
+  limits:
+    - type: Container
+      max:
+        cpu: "1"
+        memory: 1Gi

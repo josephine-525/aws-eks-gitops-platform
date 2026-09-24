@@ -1,0 +1,30 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: observability-dashboards
+  namespace: argocd
+spec:
+  generators:
+    - list:
+        elements:
+          - name: expenseapp
+            repoURL: https://gitlab.com/demo-org/expenseapp.git
+            path: dashboards
+  template:
+    metadata:
+      name: 'dashboard-{{name}}'
+    spec:
+      project: platform
+      source:
+        repoURL: '{{repoURL}}'
+        targetRevision: main
+        path: '{{path}}'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: monitoring
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true

@@ -1,0 +1,31 @@
+# Same shape and reasoning as team-fraud-detection's -- see that file's comments.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: default-limits
+  namespace: team-analytics
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+      default:
+        cpu: 50m
+        memory: 64Mi
+      max:
+        cpu: 600m
+        memory: 256Mi
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: team-analytics-quota
+  namespace: team-analytics
+spec:
+  hard:
+    requests.cpu: "200m"
+    requests.memory: 256Mi
+    limits.cpu: "1200m"
+    limits.memory: 512Mi
+    pods: "5"

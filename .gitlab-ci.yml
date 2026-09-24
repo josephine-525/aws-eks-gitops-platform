@@ -1,0 +1,185 @@
+# gitops — platform bootstrap pipeline.
+#
+# New 2026-09-21: this logic used to live inside expenseapp's own deploy-eks job.
+# Moved here because none of it is per-app work — it's cluster-lifecycle work that
+# has to happen once per fresh cluster, regardless of which apps get deployed on top
+# of it. Run this AFTER expenseinfra's compute apply, BEFORE any app's own deploy
+# pipeline (expenseapp's deploy-values job checks `kubectl auth can-i` and warns, but
+# doesn't wait for this to have run).
+#
+# Required run order: infra apply -> this pipeline -> app deploy pipeline(s).
+#
+# Manual trigger only (GitLab -> CI/CD -> Pipelines -> "Run pipeline"), not on every
+# push. Idempotent (helm upgrade --install, kubectl apply) -- safe to re-run any time,
+# and this project routinely tears the whole cluster down between sessions, so this
+# is expected to run again on most fresh clusters.
+#
+# Required CI/CD variables:
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION (masked) -- this
+#     identity must already have an EKS access entry (EKS_CI_PRINCIPAL_ARN passed to
+#     expenseinfra's dev/compute apply).
+#   GRAFANA_ADMIN_PASSWORD (masked) -- admin password for the grafana-admin-credentials
+#     Secret this job creates (kube-prometheus-stack's values.yaml, in the
+#     observability repo, references it via grafana.admin.existingSecret).
+#   GITOPS_READ_TOKEN (masked, read_repository, group-wide across demo-org) --
+#     builds the 5 ArgoCD repository-credential Secrets (expenseapp, helm-charts,
+#     fraud-detection-demo, analytics-demo, observability) so ArgoCD can pull each of
+#     them. Deliberately read-only and group-wide, not scoped to any one repo.
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - when: never
+
+stages:
+  - bootstrap
+
+variables:
+  EKS_CLUSTER_NAME: demoapp-dev-expense-eks
+
+bootstrap:
+  image: alpine:3.20
+  stage: bootstrap
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  before_script:
+    - apk add --no-cache aws-cli kubectl gettext helm
+    - |
+      if [ -z "${GRAFANA_ADMIN_PASSWORD:-}" ]; then
+        echo "Set CI/CD variable GRAFANA_ADMIN_PASSWORD (masked)." >&2; exit 1
+      fi
+      if [ -z "${GITOPS_READ_TOKEN:-}" ]; then
+        echo "Set CI/CD variable GITOPS_READ_TOKEN (masked, read_repository, group-wide)." >&2; exit 1
+      fi
+      echo "=== caller identity ===" && aws sts get-caller-identity
+      aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_DEFAULT_REGION"
+  script:
+    - |
+      # ── Cluster bootstrap: LBC, metrics-server, ArgoCD ──────────────────────────
+      VPC_ID=$(aws eks describe-cluster --name "$EKS_CLUSTER_NAME" --region "$AWS_DEFAULT_REGION" \
+        --query 'cluster.resourcesVpcConfig.vpcId' --output text)
+      EKS_AWS_LBC_ROLE_ARN=$(aws ssm get-parameter --name /dev/compute/aws_lbc_role_arn \
+        --region "$AWS_DEFAULT_REGION" --query 'Parameter.Value' --output text)
+      echo "VPC_ID=$VPC_ID  LBC_ROLE_ARN=$EKS_AWS_LBC_ROLE_ARN"
+
+      helm repo add eks https://aws.github.io/eks-charts >/dev/null
+      helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/ >/dev/null
+      helm repo add argo https://argoproj.github.io/argo-helm >/dev/null
+      helm repo update >/dev/null
+
+      # keepTLSSecret: avoid rotating webhook CA every helm upgrade; else caBundle vs
+      # pod cert drift -> x509 unknown authority on Ingress apply.
+      helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
+        --namespace kube-system \
+        --set clusterName="$EKS_CLUSTER_NAME" \
+        --set region="$AWS_DEFAULT_REGION" \
+        --set vpcId="$VPC_ID" \
+        --set serviceAccount.create=true \
+        --set serviceAccount.name=aws-load-balancer-controller \
+        --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"="$EKS_AWS_LBC_ROLE_ARN" \
+        --set keepTLSSecret=true \
+        --set createIngressClassResource=true \
+        --set ingressClass=alb
+      kubectl rollout restart deployment/aws-load-balancer-controller -n kube-system
+      kubectl rollout status deployment/aws-load-balancer-controller -n kube-system --timeout=600s
+
+      # metrics-server: HPA reads from metrics.k8s.io, not from kube-prometheus-stack.
+      # Cluster-level capability, not an observability concern.
+      helm upgrade --install metrics-server metrics-server/metrics-server \
+        --namespace kube-system --wait --timeout 5m
+
+      # applicationSet enabled: our own applicationsets/*.yaml need the
+      # ApplicationSet controller to reconcile.
+      helm upgrade --install argocd argo/argo-cd \
+        --namespace argocd --create-namespace \
+        --set server.service.type=ClusterIP \
+        --set dex.enabled=false \
+        --set notifications.enabled=false \
+        --set applicationSet.enabled=true \
+        --wait --timeout 10m
+    - |
+      # ── monitoring namespace + Grafana admin credentials ────────────────────────
+      # kube-prometheus-stack itself is ArgoCD-managed (applications/
+      # kube-prometheus-stack.yaml below, values from the observability repo) --
+      # this job's only responsibility here is the one thing ArgoCD/Helm can't
+      # create on their own: the namespace and the Secret its values.yaml
+      # references via grafana.admin.existingSecret (never committed in plaintext).
+      kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+      kubectl apply -f - <<EOF
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: grafana-admin-credentials
+        namespace: monitoring
+      type: Opaque
+      stringData:
+        admin-user: admin
+        admin-password: "$GRAFANA_ADMIN_PASSWORD"
+      EOF
+    - |
+      # ── ArgoCD repo-credential Secrets, all 5 repos our Applications pull from ──
+      # Read-only, group-wide token -- least privilege. Idempotent, safe to
+      # recreate every run.
+      for repo in expenseapp helm-charts fraud-detection-demo analytics-demo observability; do
+        kubectl apply -f - <<EOF
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: ${repo}-repo-creds
+        namespace: argocd
+        labels:
+          argocd.argoproj.io/secret-type: repository
+      stringData:
+        type: git
+        url: https://gitlab.com/demo-org/${repo}.git
+        username: oauth2
+        password: ${GITOPS_READ_TOKEN}
+      EOF
+      done
+    - |
+      # ── Ensure all 3 team namespaces exist ──────────────────────────────────────
+      # ArgoCD creates team-payments asynchronously via expense-teams.yaml's
+      # CreateNamespace=true, but NetworkPolicy/ResourceQuota/LimitRange/RBAC below
+      # target all 3 team namespaces and need them to exist NOW, not eventually --
+      # idempotent, no conflict with ArgoCD also creating team-payments later.
+      for ns in team-payments team-fraud-detection team-analytics; do
+        kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f -
+      done
+    - |
+      # ── AppProjects, before anything that references them ───────────────────────
+      # Each team's Applications are confined to their own sourceRepos/destination
+      # namespace; ArgoCD validates an Application's `project:` at sync time, so
+      # these must exist before expense-teams.yaml etc. below.
+      kubectl apply -f appprojects/team-payments.yaml
+      kubectl apply -f appprojects/team-fraud-detection.yaml
+      kubectl apply -f appprojects/team-analytics.yaml
+      kubectl apply -f appprojects/platform.yaml
+    - |
+      # ── NetworkPolicy + ResourceQuota/LimitRange guardrails ─────────────────────
+      # Platform-owned, not editable by the teams they constrain (same reasoning as
+      # the RBAC file below) -- a namespace's occupant must never be able to edit
+      # its own fence.
+      kubectl apply -f network-policies/team-payments.yaml
+      kubectl apply -f network-policies/team-fraud-detection.yaml
+      kubectl apply -f network-policies/team-analytics.yaml
+      kubectl apply -f resource-management/team-payments.yaml
+      kubectl apply -f resource-management/team-fraud-detection.yaml
+      kubectl apply -f resource-management/team-analytics.yaml
+    - |
+      # ── RBAC guardrails ──────────────────────────────────────────────────────
+      kubectl apply -f rbac/team-payments-developer.yaml
+    - |
+      # ── Apply our own Application/ApplicationSet definitions ────────────────────
+      # Already checked out (this repo's own pipeline) -- no clone needed, unlike
+      # when expenseapp's CI used to do this. Plain kubectl-applied manifests, not
+      # GitOps-managed themselves (no app-of-apps layer -- overkill at this scale).
+      kubectl apply -f applicationsets/expense-teams.yaml
+      kubectl apply -f applications/kube-prometheus-stack.yaml
+      kubectl apply -f applicationsets/observability-dashboards.yaml
+      kubectl apply -f applications/team-payments-ingress.yaml
+    - |
+      echo ""
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo "Platform bootstrap done. Next: run each app's own deploy pipeline"
+      echo "(e.g. expenseapp's build+deploy-values)."
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

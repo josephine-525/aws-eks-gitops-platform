@@ -1,0 +1,60 @@
+# team-fraud-detection's values.yaml declares NO resources at all (chart default
+# `resources: {}`) -- a ResourceQuota constraining requests.cpu/requests.memory in
+# this namespace would otherwise REJECT every pod outright (Kubernetes requires
+# explicit container resource requests whenever the namespace has a compute
+# ResourceQuota). LimitRange's defaultRequest/default fields solve this: pods with
+# no resources specified get these values injected automatically, no values.yaml
+# edit needed.
+#
+# max/limits.cpu sized from a REAL constraint hit live, not guessed: the
+# CloudWatch Observability addon auto-injects 4 OpenTelemetry instrumentation init
+# containers into EVERY pod (java/nodejs/python/dotnet -- it can't know the app's
+# language in advance, so it adds all 4), each with a fixed `limits.cpu: 500m` that
+# LimitRange/ResourceQuota can't override, only accommodate. First attempt used
+# max: 200m and ResourceQuota limits.cpu: 500m (sized for http-echo alone) --
+# pods failed outright ("maximum cpu usage per Container is 200m, but limit is
+# 500m"), and even after fixing max, 500m in ResourceQuota was exactly the single
+# largest init container's own limit with zero headroom for a rolling update
+# (briefly 2 pods = 1000m). max raised to 600m (comfortably above the 500m
+# injected ceiling), ResourceQuota limits.cpu raised to 1200m (2x that plus
+# buffer, not just 1x).
+#
+# A second real bug hit right after this one: an earlier fix-up pass (editing this
+# same comment) used a naive `content.split('---')` / rejoin in a Python one-liner
+# to patch the comment text, which silently DROPPED the LimitRange resource below
+# entirely -- the file still parsed as valid YAML (1 document instead of 2), so
+# nothing caught it until the live cluster kept showing the OLD 200m limit after
+# what looked like a successful commit+push+pipeline-run. Lesson: never patch a
+# multi-document YAML file with generic string splitting on "---"; use a real YAML
+# library (or just Read+Write the whole file) so a bug can't silently delete a
+# document instead of erroring.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: default-limits
+  namespace: team-fraud-detection
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+      default:
+        cpu: 50m
+        memory: 64Mi
+      max:
+        cpu: 600m
+        memory: 256Mi
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: team-fraud-detection-quota
+  namespace: team-fraud-detection
+spec:
+  hard:
+    requests.cpu: "200m"
+    requests.memory: 256Mi
+    limits.cpu: "1200m"
+    limits.memory: 512Mi
+    pods: "5"
