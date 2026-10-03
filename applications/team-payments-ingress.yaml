@@ -1,0 +1,18 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: team-payments-ingress
+  namespace: argocd
+spec:
+  project: platform
+  source:
+    repoURL: https://gitlab.com/demo-org/expenseapp.git
+    targetRevision: main
+    path: ingress
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: team-payments
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

@@ -1,0 +1,49 @@
+# DENY, not ALLOW -- deliberate choice, found live 2026-10-02. An ALLOW-action policy
+# flips the whole selected workload to default-deny (nothing passes except what an
+# ALLOW rule matches), which would have required enumerating every legitimate path/
+# method ALB's plaintext traffic needs (/, /expenses, /months, /summary, the CORS
+# OPTIONS preflight on all of them) just to avoid breaking the public API -- confirmed
+# live: an earlier ALLOW-based version of this file 403'd ALB's real /expenses traffic
+# immediately. A DENY-action policy with no ALLOW policy alongside it keeps backend's
+# default behavior as "allow everything" (unchanged from before this file existed) and
+# only blocks the one specific thing that needs blocking -- Istio evaluates DENY before
+# ALLOW, and the implicit default stays ALLOW as long as no ALLOW-action policy exists
+# for this workload.
+#
+# Identity comes from the mTLS-verified SPIFFE principal (cluster.local/ns/<namespace>/
+# sa/<serviceaccount> -- the spiffe:// scheme prefix is implied, Istio's own convention
+# is to omit it). team-fraud-detection's workload uses the `default` ServiceAccount,
+# confirmed via `kubectl get deployment ... -o jsonpath='{.spec.template.spec.
+# serviceAccountName}'` earlier today.
+#
+# team-payments' PeerAuthentication is PERMISSIVE (not STRICT) -- a caller with no mTLS
+# certificate (ALB, any future non-mesh caller) has no principal at all, so
+# `notPrincipals` below matches it (it's certainly "not team-fraud-detection"), and the
+# DENY applies to it too for this one path -- ALB was never supposed to be able to call
+# /expenses/flag directly anyway, so this is correct, not a gap.
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: team-payments-backend-protect-flag-endpoint
+  namespace: team-payments
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: team-payments-backend
+  action: DENY
+  rules:
+    - to:
+        - operation:
+            methods: ["POST"]
+            paths: ["/expenses/flag"]
+      from:
+        - source:
+            notPrincipals: ["cluster.local/ns/team-fraud-detection/sa/default"]
+# team-analytics is the negative control: the NetworkPolicy *-meshtest rules already let
+# its traffic reach backend at the network layer. Its principal
+# (cluster.local/ns/team-analytics/sa/default) is certainly not
+# "cluster.local/ns/team-fraud-detection/sa/default", so notPrincipals matches it and it
+# gets denied on /expenses/flag specifically -- a real 403 from Envoy's identity check,
+# not a network-layer timeout/reset. Everything else on backend (the real public API)
+# stays open to it too, same as to anyone else, which is fine: nothing else on backend is
+# meant to be identity-protected.

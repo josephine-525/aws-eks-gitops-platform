@@ -1,0 +1,116 @@
+# Simpler than team-payments: no Ingress/ALB, no ServiceMonitor -- nothing calls
+# INTO this team's pod from outside the cluster (no DynamoDB, no external API). Only
+# needs: kubelet probes (VPC-internal) + DNS + egress to the kafka namespace
+# (allow-kafka-egress) + egress to team-payments-backend (allow-team-payments-egress
+# below, added when this became the one real cross-team caller in the whole
+# architecture -- reports fraud flags back via HTTP, not Kafka).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: team-fraud-detection
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-baseline
+  namespace: team-fraud-detection
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 10.50.0.0/16   # kubelet probes
+    - from:
+        - podSelector: {}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# See team-payments.yaml's allow-kafka-egress for why this is a separate object.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-kafka-egress
+  namespace: team-fraud-detection
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kafka
+      ports:
+        - protocol: TCP
+          port: 9092
+---
+# The one real cross-team call in this whole architecture: reporting a
+# flagged expense back to team-payments-backend over HTTP (see main.go's
+# reportFlags). Separate object, same reasoning as allow-kafka-egress above.
+# This is also the deliberate target for a service-mesh AuthorizationPolicy
+# later -- NetworkPolicy only answers "can this namespace's traffic reach
+# that namespace on this port," not "is the caller who it claims to be";
+# that's the layer AuthorizationPolicy adds on top, not a replacement for
+# this.
+#
+# port 8080 added (real bug found live 2026-10-02): once both this namespace and
+# team-payments joined the mesh, Envoy routes this call pod-to-pod via EDS using the
+# backend CONTAINER's real port (8080), not the Service's port (80) -- confirmed via
+# the caller sidecar's own admin API (`/clusters`), which showed
+# `outbound|80||team-payments-backend...::<podIP>:8080::cx_connect_fail::1` for the
+# one real test request. kube-proxy's Service 80->8080 translation is bypassed
+# entirely for mesh-to-mesh calls, so a NetworkPolicy written only against the
+# Service's port 80 (correct before Istio existed) silently drops this traffic now.
+# Keeping 80 too since the Service port is still the right thing for any non-mesh
+# caller that might someday egress through here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-team-payments-egress
+  namespace: team-fraud-detection
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: team-payments
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 8080
+---
+# Istio sidecar -> istiod, a hard requirement for the mesh to work at all --
+# see team-payments.yaml's allow-istiod-egress for the full story (real gap
+# found live 2026-10-02, every istio-proxy container stuck Init:1/6 forever
+# without this).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-istiod-egress
+  namespace: team-fraud-detection
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
+      ports:
+        - protocol: TCP
+          port: 15012

@@ -1,0 +1,19 @@
+# Single shared topic for all expense events, event_type field distinguishes
+# kinds (expense.created for now). 3 partitions (keyed by user_id, so one
+# user's events stay ordered). replicas: 3 (bumped from 1 -- see cluster.yaml's
+# comment on the 3-broker/3-AZ redesign) -- this is the topic's OWN replication
+# factor; cluster.yaml's default.replication.factor only applies to topics that
+# don't set this explicitly, so it has to be set here too, not just at the
+# cluster level.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: expense-events
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: expense-kafka
+spec:
+  partitions: 3
+  replicas: 3
+  config:
+    retention.ms: "604800000" # 7 days

@@ -1,0 +1,77 @@
+# Platform-owned RBAC guardrail for team-payments -- deliberately NOT in expenseapp's
+# own repo. Same reasoning as NetworkPolicy/ResourceQuota/LimitRange: these are the
+# isolation boundaries themselves, so only the platform (this repo) should be able to
+# edit them, never the team whose access they constrain.
+#
+# team-payments-developer-test is a dedicated ServiceAccount that exists ONLY to prove
+# this Role's boundaries actually work, via `kubectl auth can-i --as=`. It is
+# deliberately NOT bound to any real operational identity (not CI, not a human) --
+# CI's own AWS/kubectl identity is shared across many pipelines with very different
+# scopes (terraform apply, cluster bootstrap, app deploy), so narrowing its RBAC here
+# would break work it legitimately needs to do elsewhere. A human (the project owner)
+# already has cluster-admin via their own EKS access entry, so binding this Role to
+# them wouldn't actually restrict anything either. This ServiceAccount sidesteps both
+# problems: it has no other purpose, so what it can and can't do is a clean,
+# unambiguous test of the Role itself.
+#
+# Design principle: humans/test-identities get READ + exec, never direct write access
+# to workloads. Real mutations happen through GitOps (edit values.yaml in git -> CI ->
+# ArgoCD syncs) -- direct kubectl writes fight ArgoCD's selfHeal and bypass review
+# entirely (see gitops's own README / the Ingress-delete incident this project hit
+# 2026-09-20). The write path belongs to ArgoCD's own reconciler, not to a person.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: team-payments-developer-test
+  namespace: team-payments
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: team-payments-developer
+  namespace: team-payments
+rules:
+  # Read-only visibility into this namespace's own workloads.
+  - apiGroups: ["", "apps", "autoscaling", "policy", "networking.k8s.io"]
+    resources:
+      - pods
+      - pods/log
+      - services
+      - configmaps
+      - deployments
+      - replicasets
+      - horizontalpodautoscalers
+      - poddisruptionbudgets
+      - ingresses
+      - events
+    verbs: ["get", "list", "watch"]
+  # Allow a rollout restart (patch), not create/delete -- the actual create/update/
+  # delete lifecycle belongs to ArgoCD's own sync, not a human's kubectl.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["patch"]
+  # Live debugging only.
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  # Deliberately NOT granted, and don't add without re-deriving why:
+  #  - secrets (any verb)              -- avoid bulk credential exposure
+  #  - roles / rolebindings (any verb) -- classic privilege-escalation vector
+  #  - networkpolicies / resourcequotas / limitranges (any verb) -- these ARE the
+  #    isolation guardrails; a namespace's own occupant must never be able to edit
+  #    its own fence
+  #  - deployments: create/delete       -- that's ArgoCD's job, not a human's
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: team-payments-developer-binding
+  namespace: team-payments
+subjects:
+  - kind: ServiceAccount
+    name: team-payments-developer-test
+    namespace: team-payments
+roleRef:
+  kind: Role
+  name: team-payments-developer
+  apiGroup: rbac.authorization.k8s.io

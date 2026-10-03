@@ -1,0 +1,16 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: team-analytics
+  namespace: argocd
+spec:
+  description: team-analytics's own Applications only
+  sourceRepos:
+    - https://gitlab.com/demo-org/helm-charts.git
+    - https://gitlab.com/demo-org/analytics-demo.git
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: team-analytics
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace

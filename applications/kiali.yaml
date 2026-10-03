@@ -1,0 +1,45 @@
+# Mesh visualization -- shows live request topology (who calls whom), mTLS status per
+# edge, and success/error rates, reading from the Prometheus metrics the new
+# ServiceMonitor/PodMonitor in gitops/istio/monitoring.yaml now feed it (istiod +
+# per-sidecar Envoy stats). Without that file this would install cleanly but show an
+# empty graph -- Kiali has no metrics of its own, it's a read-only lens on Prometheus.
+#
+# helm.parameters (not a separate values file) because this is 2 scalar settings, not
+# a values block worth a whole file in the observability repo -- same reasoning
+# kafka-operator.yaml uses for its own single parameter.
+#
+# auth.strategy=anonymous: this is a personal demo cluster with no real users to
+# authenticate -- not a production choice, deliberately not building real auth here.
+#
+# external_services.prometheus.url points at this cluster's actual Prometheus Service
+# name (kube-prometheus-stack-prometheus.monitoring, confirmed via `kubectl get svc -n
+# monitoring`) -- Kiali's own chart default assumes a differently-named Service
+# (typically prometheus.istio-system or similar from an Istio-addon-style install),
+# which doesn't exist here, so this must be set explicitly or Kiali comes up with no
+# data source at all.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kiali
+  namespace: argocd
+spec:
+  project: platform
+  source:
+    repoURL: https://kiali.org/helm-charts
+    chart: kiali-server
+    targetRevision: 2.32.0
+    helm:
+      parameters:
+        - name: auth.strategy
+          value: anonymous
+        - name: external_services.prometheus.url
+          value: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: istio-system
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

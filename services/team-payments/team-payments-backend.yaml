@@ -1,0 +1,5 @@
+name: team-payments-backend
+namespace: team-payments
+project: team-payments
+valuesRepoURL: https://gitlab.com/demo-org/expenseapp.git
+valuesFile: values-backend.yaml

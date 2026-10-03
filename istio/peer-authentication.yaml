@@ -1,0 +1,53 @@
+# STRICT mTLS, scoped per-namespace rather than mesh-wide. Only team-payments,
+# team-fraud-detection, team-analytics have the istio-injection=enabled label and
+# therefore an istio-proxy sidecar able to originate/terminate mTLS at all. A
+# mesh-wide STRICT policy in istio-system would apply equally to ingress for
+# every OTHER namespace in the cluster (argocd, kube-system, monitoring, kafka --
+# none of which are mesh-enabled), and since those pods have no sidecar to
+# terminate mTLS, STRICT there would just mean "reject all plaintext, provide no
+# way to send anything else" -- silently breaking kubelet probes and any
+# unrelated in-cluster traffic to those namespaces. Scoping per-namespace avoids
+# that blast radius entirely.
+# team-payments is PERMISSIVE, not STRICT (changed live 2026-10-02, after first trying
+# STRICT namespace-wide + a workload-level PERMISSIVE override for just the frontend --
+# reverted that split, see git history on this file if curious). Real bugs hit under
+# STRICT: ALB's plaintext calls (no sidecar, ever) got "502 Bad Gateway" on both "/" and
+# the direct-to-backend API paths; Prometheus's plaintext scrape of the nginx-exporter
+# sidecar's :9113/metrics showed health="down" in Prometheus's own /api/v1/targets.
+#
+# The actual realization: PeerAuthentication is the wrong layer to enforce "who's allowed
+# to call the sensitive cross-team endpoint" -- that's AuthorizationPolicy's job (matched
+# on the mTLS-verified principal). PERMISSIVE doesn't weaken real mesh-to-mesh traffic:
+# Istio's own "auto mTLS" still upgrades frontend->backend and fraud-detection->backend to
+# real mTLS automatically, since both sides are mesh members. PERMISSIVE only means a
+# non-mesh caller (ALB, Prometheus) CAN connect in plaintext -- and a plaintext connection
+# has no verified principal, so it can never satisfy an AuthorizationPolicy ALLOW rule
+# written against principals anyway. STRICT would have meant "reject ALB outright before
+# authorization even gets a say"; PERMISSIVE + AuthorizationPolicy means "let it connect,
+# then reject it for not being anyone" -- same outcome for an attacker, no outage for ALB.
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: team-payments
+spec:
+  mtls:
+    mode: PERMISSIVE
+---
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: team-fraud-detection
+spec:
+  mtls:
+    mode: STRICT
+---
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: team-analytics
+spec:
+  mtls:
+    mode: STRICT

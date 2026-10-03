@@ -1,0 +1,50 @@
+# Strimzi cluster operator -- platform-owned, not team-owned, same reasoning
+# as kube-prometheus-stack.yaml. Helm release name pinned to match the
+# original manual `helm install strimzi-cluster-operator ...` exactly, so
+# ArgoCD's rendered resource names line up with what's already live in the
+# kafka namespace and this Application adopts them instead of duplicating.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kafka-operator
+  namespace: argocd
+spec:
+  project: platform
+  source:
+    repoURL: https://strimzi.io/charts/
+    chart: strimzi-kafka-operator
+    targetRevision: 1.2.0
+    helm:
+      releaseName: strimzi-cluster-operator
+      parameters:
+        - name: watchAnyNamespace
+          value: "false"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kafka
+  # kafkas.kafka.strimzi.io's CRD showed permanent OutOfSync -- root-caused
+  # 2026-10-01, NOT an apply-strategy issue (tried Replace=true+SSA, then
+  # SSA alone, same result either way; a direct size/structural diff between
+  # the rendered manifest and the live object was the only way to actually
+  # find it). The chart's own schema declares
+  # status.properties.clusterSecurity with `properties: {}` (empty) +
+  # `x-kubernetes-preserve-unknown-fields: true` -- the API server's CRD
+  # structural-schema storage legitimately prunes an empty `properties: {}`
+  # node as carrying no real schema information, so the live object
+  # permanently differs from the submitted manifest at exactly this one
+  # path, no matter how it's applied. Confirmed via a real recursive diff
+  # (rendered manifest vs live object), not assumed -- this was the ONLY
+  # structural difference found anywhere in an 800KB+ schema.
+  ignoreDifferences:
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+      name: kafkas.kafka.strimzi.io
+      jsonPointers:
+        - /spec/versions/0/schema/openAPIV3Schema/properties/status/properties/clusterSecurity/properties
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

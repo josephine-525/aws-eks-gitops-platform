@@ -1,0 +1,5 @@
+name: team-fraud-detection
+namespace: team-fraud-detection
+project: team-fraud-detection
+valuesRepoURL: https://gitlab.com/demo-org/fraud-detection-demo.git
+valuesFile: values.yaml

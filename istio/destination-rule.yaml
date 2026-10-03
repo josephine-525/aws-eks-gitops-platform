@@ -1,0 +1,30 @@
+# Circuit breaking for the fraud-detection -> backend call, added deliberately after
+# mTLS + AuthorizationPolicy were done (per explicit discussion: this is a mesh
+# selling point worth demonstrating, not a reaction to anything that broke live).
+#
+# DestinationRule lives in the DESTINATION's namespace (team-payments) by Istio
+# convention, but it governs how ANY caller's own Envoy treats connections to this
+# host -- outlierDetection runs client-side, in the calling sidecar's load balancer,
+# not on the backend pods themselves.
+#
+# consecutive5xxErrors: 3 -- small and demo-appropriate; a real production value would
+# be tuned against actual error-rate baselines, not guessed.
+# maxEjectionPercent: 50 -- backend currently runs 2 replicas; capping ejection at 50%
+# guarantees at least one healthy endpoint always stays in the pool. A higher cap could
+# eject every endpoint at once if both failed together, which would turn the circuit
+# breaker itself into an outage instead of preventing one -- same "don't let the safety
+# mechanism remove all capacity" reasoning as the PDB's maxUnavailable: 1 for the EKS
+# node-group upgrades (see CLAUDE.md).
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: team-payments-backend
+  namespace: team-payments
+spec:
+  host: team-payments-backend-common-web-service.team-payments.svc.cluster.local
+  trafficPolicy:
+    outlierDetection:
+      consecutive5xxErrors: 3
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50

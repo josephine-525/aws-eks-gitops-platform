@@ -1,0 +1,34 @@
+# Same shape and reasoning as team-fraud-detection's -- see that file's comments,
+# including the requests.memory 256Mi->512Mi bump and the limits.cpu 1200m->2000m
+# bump, both for the Istio sidecar (istio-init + istio-proxy together add 400m of
+# limits.cpu per pod, confirmed live on team-fraud-detection's running pod).
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: default-limits
+  namespace: team-analytics
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 10m
+        memory: 32Mi
+      default:
+        cpu: 50m
+        memory: 64Mi
+      max:
+        cpu: 600m
+        memory: 256Mi
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: team-analytics-quota
+  namespace: team-analytics
+spec:
+  hard:
+    requests.cpu: "200m"
+    requests.memory: 512Mi
+    limits.cpu: "2000m"
+    limits.memory: 768Mi
+    pods: "5"

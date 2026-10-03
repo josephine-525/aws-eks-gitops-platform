@@ -1,0 +1,152 @@
+# Default-deny + selectively allow, for team-payments specifically (has real ingress
+# from the ALB + is scraped by Prometheus, unlike the other two teams).
+#
+# ALB traffic (target-type: ip) and kubelet health-check probes both arrive from
+# inside the VPC, not from a specific namespace/pod -- ipBlock on the VPC CIDR is the
+# only way to allow them; namespaceSelector can't express "traffic from the node
+# itself" or "traffic from an AWS-managed ENI". This isn't a perimeter-security
+# control (that's already handled by security groups/subnet layout) -- it's
+# inter-namespace isolation between workloads that already trust the VPC network
+# layer.
+#
+# UNVERIFIED until tested live: AWS VPC CNI's NetworkPolicy agent is known to
+# actually enforce policy against kubelet-sourced probe traffic (unlike some other
+# CNIs, which exempt it automatically) -- if pods go NotReady after this applies,
+# check that first.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: team-payments
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-baseline
+  namespace: team-payments
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 10.50.0.0/16   # ALB (target-type: ip) + kubelet probes
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: 9113             # Prometheus scraping the frontend's nginx-exporter sidecar
+    - from:
+        - podSelector: {}         # same-namespace: frontend -> backend
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: "0.0.0.0/0"
+      ports:
+        - protocol: TCP
+          port: 443             # DynamoDB (via the free VPC Gateway endpoint -- the
+                                 # endpoint changes the route, not whether NetworkPolicy
+                                 # still needs to permit the destination) + any other AWS API
+    - to:
+        - podSelector: {}
+---
+# Separate object (not folded into allow-baseline) because this is business
+# connectivity specific to the Kafka producer path, not universal per-pod baseline.
+# Kafka's own listener also has its own allow (Kafka CR's networkPolicyPeers, which
+# Strimzi renders into expense-kafka-network-policy-kafka in the kafka namespace) --
+# that only covers INGRESS on the broker side. Egress from this namespace is a
+# completely separate, independently-enforced direction; without this object, the
+# producer's connection attempt just hangs (SYN sent, no response) even though the
+# broker side allows it -- confirmed live, this exact symptom, before this was added.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-kafka-egress
+  namespace: team-payments
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kafka
+      ports:
+        - protocol: TCP
+          port: 9092
+---
+# team-fraud-detection reports flagged expenses back here over HTTP (see that
+# team's main.go reportFlags + allow-team-payments-egress) -- the one real
+# cross-team call in this whole architecture, everything else crosses team
+# boundaries only through Kafka. Scoped to the backend pods specifically via
+# podSelector (app.kubernetes.io/instance, same label already used in
+# values-backend.yaml's affinity/topologySpreadConstraints), not folded into
+# allow-baseline's namespace-wide podSelector: {} -- team-fraud-detection has
+# no legitimate reason to reach the frontend, so it isn't granted that by
+# accident just because this rule was easiest to write broadly. Deliberate
+# target for a service-mesh AuthorizationPolicy later: NetworkPolicy only
+# answers "can traffic from that namespace reach this port," not "is the
+# caller who it claims to be."
+#
+# port 8080 added -- same real bug, same fix as allow-team-payments-egress's
+# comment in team-fraud-detection.yaml: mesh-to-mesh calls route to the backend
+# container's real port (8080) via Envoy's own EDS, bypassing the Service's port
+# (80) that this rule was originally written against.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-fraud-detection-ingress
+  namespace: team-payments
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: team-payments-backend
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: team-fraud-detection
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 8080
+---
+# Istio sidecar -> istiod, a hard requirement for the mesh to work at all, not
+# optional. Real gap found live 2026-10-02: this namespace's default-deny
+# predates Istio and had no rule for istio-system at all -- every istio-proxy
+# container timed out dialing istiod on 15012 ("i/o timeout"), confirmed via
+# the proxy's own logs ("failed to sign CSR... dial tcp ...:15012"), which
+# left every new pod stuck Init:1/6 forever (the proxy's startup probe never
+# passes without a cert from istiod). Port 15012 confirmed from istiod's own
+# Service spec (https-dns, the secure XDS+CA channel), not guessed.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-istiod-egress
+  namespace: team-payments
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: istio-system
+      ports:
+        - protocol: TCP
+          port: 15012

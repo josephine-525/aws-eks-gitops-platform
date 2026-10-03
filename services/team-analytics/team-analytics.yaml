@@ -1,0 +1,5 @@
+name: team-analytics
+namespace: team-analytics
+project: team-analytics
+valuesRepoURL: https://gitlab.com/demo-org/analytics-demo.git
+valuesFile: values.yaml

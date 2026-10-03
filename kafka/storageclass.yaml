@@ -1,0 +1,23 @@
+# gp3 StorageClass for Kafka's persistent-claim storage (terraform-modules/
+# compute's aws_eks_addon "ebs_csi", v2.3.0+). Real gap found 2026-10-02: this
+# was only ever created manually (kubectl apply from a throwaway test file)
+# when the EBS CSI driver was first verified -- never committed anywhere, so
+# it silently didn't exist on the next fresh cluster build, and all 3 Kafka
+# broker pods sat Pending ("pod has unbound immediate PersistentVolumeClaims")
+# until this was re-created by hand. Same class of gap as the Kafka CR itself
+# used to be (lived only in the cluster, not in git) -- fixed the same way:
+# promote it to a real, re-appliable file.
+#
+# Not set as cluster-default (no storageclass.kubernetes.io/is-default-class
+# annotation) -- the existing gp2 StorageClass (EKS's own in-tree default) is
+# left alone, and kafka/cluster.yaml explicitly requests `class: gp3` by
+# name, so nothing needs this to be the cluster default.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp3
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete

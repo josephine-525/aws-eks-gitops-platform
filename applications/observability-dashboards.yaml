@@ -1,0 +1,31 @@
+# Replaces the old applicationsets/observability-dashboards.yaml (a List-generator
+# ApplicationSet with one element per service repo's own dashboards/ dir). Dashboards
+# now live centrally in one repo (teams/<team>/*.yaml), so a single plain Application
+# is enough -- no per-service/per-team parameterization needed, just "sync this repo".
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: observability-dashboards
+  namespace: argocd
+spec:
+  project: platform
+  source:
+    repoURL: https://gitlab.com/demo-org/observability-dashboards.git
+    targetRevision: main
+    path: teams
+    directory:
+      # ArgoCD does NOT recurse into subdirectories by default on a plain
+      # directory-source Application -- without this, nothing below
+      # teams/<team>/ would ever sync (verified against ArgoCD's own docs:
+      # "By default, directory applications will only include the files
+      # from the root of the configured repository/path").
+      recurse: true
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

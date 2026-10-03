@@ -1,0 +1,40 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kube-prometheus-stack
+  namespace: argocd
+spec:
+  project: platform
+  sources:
+    - repoURL: https://prometheus-community.github.io/helm-charts
+      chart: kube-prometheus-stack
+      targetRevision: 91.4.1
+      helm:
+        valueFiles:
+          - $values/kube-prometheus-stack/values.yaml
+    - repoURL: https://gitlab.com/demo-org/observability.git
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      # kube-prometheus-stack's largest CRDs (prometheuses, alertmanagers, thanosrulers,
+      # scrapeconfigs, prometheusagents, alertmanagerconfigs) fail client-side apply with
+      # "metadata.annotations: Too long: may not be more than 262144 bytes" — the
+      # kubectl.kubernetes.io/last-applied-configuration annotation embeds the full manifest
+      # (confirmed by pulling the raw chart: the CRD's own source annotations are 94 bytes,
+      # the file itself is 643KB, all of which client-side apply tries to cram into that one
+      # annotation) and these CRDs exceed the 262144-byte annotation limit. Confirmed live:
+      # 6 of the 10 CRDs failed this way, so Prometheus/Alertmanager never got created at all.
+      # ServerSideApply=true alone did NOT fix this (tested live, same error on a guaranteed
+      # fresh sync) — this ArgoCD version still appears to attach last-applied-configuration
+      # for these resources despite that option. Replace=true forces kubectl-replace (PUT)
+      # semantics, which never uses that annotation at all regardless of SSA support nuances.
+      - ServerSideApply=true
+      - Replace=true
