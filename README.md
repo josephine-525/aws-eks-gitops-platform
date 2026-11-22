@@ -10,6 +10,8 @@ Everything in these 10 repos is what came out of going deep on that choice: a la
 
 ## Architecture
 
+<img width="656" height="504" alt="image" src="https://github.com/user-attachments/assets/a0485b1a-b0d3-4ff2-b989-566f395b19a2" />
+
 ### 1. Provisioning the infrastructure (layered Terraform, per environment)
 
 ```mermaid
